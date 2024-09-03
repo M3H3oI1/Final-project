@@ -1,0 +1,233 @@
+#include <ESP8266WiFi.h>
+#include <ESP8266HTTPClient.h>
+#include <Adafruit_PCF8574.h>
+
+#define SH D5
+#define ST D6
+#define DS D4
+#define butt D7
+#define buzz D3
+
+#define IR1  0
+#define IR2  1
+#define IR3  2
+#define IR4  4
+#define IR5  5
+#define IR6  6
+
+#define eled1 0
+#define gled1 1
+#define yled1 2
+#define rled1 3
+#define eled2 4
+#define gled2 5
+#define yled2 6
+#define rled2 7
+
+#define ROAD1 0
+#define ROAD2 1
+#define RED    1
+#define YELLOW 2
+#define GREEN  3
+#define EMERG  4
+#define input(x) pcf.digitalRead(x)
+
+const char ssid[] = "Hello";
+const char pass[] = "111223344";
+const char link0[] = "http://esinebd.com/projects/traffic/update_machine.php";
+const char link1[] = "http://esinebd.com/projects/traffic/stat_machine.php";
+
+WiFiClient client;
+HTTPClient http;
+Adafruit_PCF8574 pcf;
+
+bool flip;
+bool timeMode, update, serverMode, emrg1, emrg2;
+byte density1, density2, pDensity1, pDensity2;
+byte sec;
+long pMs, prevMs;
+
+void setup() {
+  Serial.begin(9600);
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(ssid, pass);
+  Wire.begin(D2, D1);
+
+  pinMode(SH, OUTPUT);
+  pinMode(ST, OUTPUT);
+  pinMode(DS, OUTPUT);
+  pinMode(butt, INPUT);
+  pinMode(buzz, OUTPUT);
+
+  if (pcf.begin(0x27, &Wire)) Serial.println("PCF OK.");
+  else Serial.println("PCF FAILED.");
+  for (byte p = 0; p < 8; p++) {
+    pcf.pinMode(p, INPUT);
+  }
+
+  traffic(ROAD1, GREEN);
+  traffic(ROAD2, GREEN);
+}
+
+void loop() {
+  if (!digitalRead(butt)) {
+    digitalWrite(buzz, 1);
+    timeMode = !timeMode;
+    Serial.println((String)"TimerMode: " + timeMode);
+    if (timeMode == 1) delay(1000);
+    else delay(500);
+    digitalWrite(buzz, 0);
+  }
+
+  if (!input(IR1) && !input(IR2) && !input(IR3)) density1 = 3;
+  else if (!input(IR1) && !input(IR2) && input(IR3)) density1 = 2;
+  else if (!input(IR1) && input(IR2) && input(IR3)) density1 = 1;
+  else if (input(IR1) && input(IR2) && input(IR3)) density1 = 0;
+
+  if (!input(IR4) && !input(IR5) && !input(IR6)) density2 = 3;
+  else if (!input(IR4) && !input(IR5) && input(IR6)) density2 = 2;
+  else if (!input(IR4) && input(IR5) && input(IR6)) density2 = 1;
+  else if (input(IR4) && input(IR5) && input(IR6)) density2 = 0;
+
+  if (pDensity1 != density1) {
+    update = 1;
+    pDensity1 = density1;
+  }
+  if (pDensity2 != density2) {
+    update = 1;
+    pDensity2 = density2;
+  }
+
+  if (serverMode == 0) {
+    if (timeMode == 1) {
+      if (millis() - pMs >= 1000) {
+        if (sec == 3) {
+          traffic(ROAD1, GREEN);
+          traffic(ROAD2, RED);
+        }
+        else if (sec == 10) {
+          traffic(ROAD1, YELLOW);
+          traffic(ROAD2, YELLOW);
+        }
+        else if (sec == 13) {
+          traffic(ROAD1, RED);
+          traffic(ROAD2, GREEN);
+        }
+        else if (sec == 20) {
+          traffic(ROAD1, YELLOW);
+          traffic(ROAD2, YELLOW);
+        }
+        sec++;
+        if (sec == 21) sec = 0;
+        pMs = millis();
+      }
+    }
+    else {
+      if (update == 1) {
+        Serial.print((String)"R1: " + density1);
+        Serial.println((String)" | R2: " + density2);
+        if (density1 > density2) {
+          traffic(ROAD1, YELLOW);
+          traffic(ROAD2, YELLOW);
+          delay(2000);
+          traffic(ROAD1, GREEN);
+          traffic(ROAD2, RED);
+        }
+        else if (density2 > density1) {
+          traffic(ROAD1, YELLOW);
+          traffic(ROAD2, YELLOW);
+          delay(2000);
+          traffic(ROAD1, RED);
+          traffic(ROAD2, GREEN);
+        }
+        else if (density1 == 0 && density2 == 0) {
+          traffic(ROAD1, GREEN);
+          traffic(ROAD2, GREEN);
+        }
+        update = 0;
+      }
+    }
+  }
+
+  if (millis() - prevMs >= 1000) {
+    serverControl();
+    if (emrg1 == 1) output(eled1, 1);
+    else output(eled1, 0);
+    if (emrg2 == 1) output(eled2, 1);
+    else output(eled2, 0);
+    if (emrg1 == 1 || emrg2 == 1) digitalWrite(buzz, !emrg1);
+    else digitalWrite(buzz, 0);
+
+    prevMs = millis();
+  }
+}
+
+void serverControl() {
+  int httpCode;
+  if (flip == 0) {
+    flip = 1;
+    String link = (String)link0 + "?rd1=" + density1 + "&rd2=" + density2;
+    if (http.begin(client, link)) {
+      httpCode = http.GET();
+      if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY)
+        Serial.println(http.getString());
+    }
+  }
+  else {
+    flip = 0;
+    if (http.begin(client, link1)) {
+      httpCode = http.GET();
+      if (httpCode == HTTP_CODE_OK || httpCode == HTTP_CODE_MOVED_PERMANENTLY) {
+        String resp = http.getString();
+        Serial.println(http.getString());
+
+        if (resp.indexOf("server=1") != -1) serverMode = 1;
+        else if (resp.indexOf("server=0") != -1) serverMode = 0;
+
+        if (serverMode == 1) {
+          if (resp.indexOf("road1=1") != -1) traffic(ROAD1, GREEN);
+          else if (resp.indexOf("road1=0") != -1) traffic(ROAD1, RED);
+
+          if (resp.indexOf("road2=1") != -1) traffic(ROAD2, GREEN);
+          else if (resp.indexOf("road2=0") != -1) traffic(ROAD2, RED);
+
+          if (resp.indexOf("butt1=1") != -1) emrg1 = 1;
+          else if (resp.indexOf("butt1=0") != -1) emrg1 = 0;
+
+          if (resp.indexOf("butt2=1") != -1) emrg2 = 1;
+          else if (resp.indexOf("butt2=0") != -1) emrg2 = 0;
+        }
+      }
+    }
+  }
+}
+
+void traffic(byte road, byte m) {
+  if (road == ROAD1) {
+    if (m == RED) output(rled1, 1);
+    else output(rled1, 0);
+    if (m == YELLOW) output(yled1, 1);
+    else output(yled1, 0);
+    if (m == GREEN) output(gled1, 1);
+    else output(gled1, 0);
+  }
+  else {
+    if (m == RED) output(rled2, 1);
+    else output(rled2, 0);
+    if (m == YELLOW) output(yled2, 1);
+    else output(yled2, 0);
+    if (m == GREEN) output(gled2, 1);
+    else output(gled2, 0);
+  }
+}
+
+void output(byte n, bool state) {
+  static byte leds = 0;
+  bitWrite(leds, n, state);
+  for (byte i = 7; i >= 0; i--) {
+    digitalWrite(DS, bitRead(leds, i));
+    digitalWrite(SH, 1); digitalWrite(SH, 0);
+    if (i == 0) break;
+  }
+  digitalWrite(ST, 1); digitalWrite(ST, 0);
+}
